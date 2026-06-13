@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "Gemini Gateway Council",
+  "version": "1.0",
+  "description": "Integrates the //council trigger directly into Gemini and ChatGPT web interfaces.",
+  "permissions": [
+    "storage"
+  ],
+  "host_permissions": [
+    "https://generativelanguage.googleapis.com/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Gemini Gateway Options"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://gemini.google.com/*",
+        "https://chatgpt.com/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_end"
+    }
+  ]
+}
