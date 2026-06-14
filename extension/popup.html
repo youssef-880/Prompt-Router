@@ -2,63 +2,193 @@
 <html>
 <head>
   <meta charset="utf-8">
-  <title>Gateway Options</title>
+  <title>AI Gateway Council</title>
   <style>
+    *, *::before, *::after { box-sizing: border-box; }
+
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      width: 320px;
-      padding: 16px;
-      background-color: #f9f9f9;
-      color: #333;
+      width: 340px;
+      padding: 0;
+      margin: 0;
+      background: #f5f5f7;
+      color: #1d1d1f;
     }
-    h2 {
-      margin-top: 0;
-      font-size: 18px;
+
+    .header {
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+      color: white;
+      padding: 16px 18px 14px;
     }
+    .header h2 {
+      margin: 0 0 2px;
+      font-size: 16px;
+      font-weight: 700;
+      letter-spacing: -0.3px;
+    }
+    .header p {
+      margin: 0;
+      font-size: 11px;
+      opacity: 0.65;
+    }
+
+    .body { padding: 16px 18px 18px; }
+
+    .section {
+      background: #fff;
+      border-radius: 10px;
+      padding: 14px 16px;
+      margin-bottom: 12px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.07);
+    }
+    .section-title {
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      color: #6e6e73;
+      margin-bottom: 12px;
+    }
+
     label {
-      display: block;
-      margin-bottom: 8px;
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      font-size: 12px;
       font-weight: 600;
-      font-size: 14px;
+      color: #3a3a3c;
+      margin-bottom: 5px;
     }
-    input[type="password"], input[type="text"] {
+    label .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .dot-gemini  { background: #4285f4; }
+    .dot-openai  { background: #10a37f; }
+    .dot-claude  { background: #d97706; }
+
+    input[type="password"] {
       width: 100%;
-      box-sizing: border-box;
-      padding: 8px;
-      margin-bottom: 16px;
-      border: 1px solid #ccc;
-      border-radius: 4px;
-      font-size: 14px;
+      padding: 8px 10px;
+      border: 1.5px solid #d2d2d7;
+      border-radius: 7px;
+      font-size: 13px;
+      font-family: inherit;
+      background: #fafafa;
+      color: #1d1d1f;
+      transition: border-color 0.15s;
+      margin-bottom: 12px;
     }
+    input[type="password"]:last-of-type { margin-bottom: 0; }
+    input[type="password"]:focus {
+      outline: none;
+      border-color: #0071e3;
+      background: #fff;
+    }
+
+    select {
+      width: 100%;
+      padding: 8px 10px;
+      border: 1.5px solid #d2d2d7;
+      border-radius: 7px;
+      font-size: 13px;
+      font-family: inherit;
+      background: #fafafa;
+      color: #1d1d1f;
+      cursor: pointer;
+      appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='%236e6e73'%3E%3Cpath d='M7 10l5 5 5-5z'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 10px center;
+    }
+    select:focus { outline: none; border-color: #0071e3; }
+
+    .row { margin-bottom: 12px; }
+    .row:last-child { margin-bottom: 0; }
+
     button {
       width: 100%;
       padding: 10px;
-      background-color: #007bff;
+      background: #0071e3;
       color: white;
       border: none;
-      border-radius: 4px;
+      border-radius: 8px;
       cursor: pointer;
       font-size: 14px;
       font-weight: 600;
+      font-family: inherit;
+      transition: background 0.15s, transform 0.1s;
     }
-    button:hover {
-      background-color: #0056b3;
-    }
+    button:hover  { background: #0077ed; }
+    button:active { background: #005bbf; transform: scale(0.99); }
+
     .status {
-      margin-top: 12px;
-      font-size: 13px;
-      color: green;
+      margin-top: 10px;
+      padding: 8px 12px;
+      border-radius: 7px;
+      font-size: 12px;
+      font-weight: 600;
+      text-align: center;
       display: none;
+    }
+    .status.success { background: #d1fae5; color: #065f46; }
+    .status.error   { background: #fee2e2; color: #991b1b; }
+
+    .hint {
+      font-size: 11px;
+      color: #8e8e93;
+      margin-top: 6px;
+      line-height: 1.4;
     }
   </style>
 </head>
 <body>
-  <h2>Gemini Gateway Council</h2>
-  <label for="apiKey">Gemini API Key</label>
-  <input type="password" id="apiKey" placeholder="AIzaSy..." />
-  
-  <button id="saveBtn">Save Key</button>
-  <div id="status" class="status">Saved successfully!</div>
+  <div class="header">
+    <h2>AI Gateway Council</h2>
+    <p>Multi-agent orchestrator — type <strong>//</strong> in any chat to activate</p>
+  </div>
+
+  <div class="body">
+
+    <div class="section">
+      <div class="section-title">Provider</div>
+      <div class="row">
+        <label for="provider">Active provider</label>
+        <select id="provider">
+          <option value="auto">Auto-detect (matches the site you're on)</option>
+          <option value="gemini">Gemini (Google)</option>
+          <option value="openai">OpenAI (ChatGPT)</option>
+          <option value="claude">Claude (Anthropic)</option>
+        </select>
+        <div class="hint">Auto-detect uses Gemini on gemini.google.com, OpenAI on chatgpt.com, and Claude on claude.ai.</div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">API Keys</div>
+
+      <div class="row">
+        <label><span class="dot dot-gemini"></span> Gemini API Key</label>
+        <input type="password" id="geminiKey" placeholder="AIzaSy…" autocomplete="off" />
+      </div>
+
+      <div class="row">
+        <label><span class="dot dot-openai"></span> OpenAI API Key</label>
+        <input type="password" id="openaiKey" placeholder="sk-…" autocomplete="off" />
+      </div>
+
+      <div class="row">
+        <label><span class="dot dot-claude"></span> Anthropic API Key</label>
+        <input type="password" id="anthropicKey" placeholder="sk-ant-…" autocomplete="off" />
+      </div>
+    </div>
+
+    <button id="saveBtn">Save Settings</button>
+    <div id="status" class="status"></div>
+
+  </div>
   <script src="popup.js"></script>
 </body>
 </html>

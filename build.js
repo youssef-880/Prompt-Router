@@ -1,81 +1,68 @@
-const fs = require('fs');
+const fs   = require('fs');
 const path = require('path');
 
 function build() {
-  const rootDir = __dirname;
-  const envPath = path.join(rootDir, '.env');
-  const srcPath = path.join(rootDir, 'extension', 'background.src.js');
-  const destPath = path.join(rootDir, 'extension', 'background.js');
+  const root    = __dirname;
+  const envPath = path.join(root, '.env');
+  const srcPath = path.join(root, 'extension', 'background.src.js');
+  const outPath = path.join(root, 'extension', 'background.js');
 
-  console.log('--- Extension Build Starting ---');
+  console.log('--- AI Gateway Council Build Starting ---');
 
-  // 1. Parse .env file
+  // 1. Parse .env
   const env = {};
   if (fs.existsSync(envPath)) {
-    console.log(`Loading environment from: ${envPath}`);
-    const envContent = fs.readFileSync(envPath, 'utf8');
-    const lines = envContent.split(/\r?\n/);
-    for (const line of lines) {
-      // Skip comments and empty lines
+    console.log(`Reading: ${envPath}`);
+    for (const line of fs.readFileSync(envPath, 'utf8').split(/\r?\n/)) {
       const trimmed = line.trim();
       if (!trimmed || trimmed.startsWith('#')) continue;
-
-      const equalIdx = trimmed.indexOf('=');
-      if (equalIdx === -1) continue;
-
-      const key = trimmed.substring(0, equalIdx).trim();
-      let val = trimmed.substring(equalIdx + 1).trim();
-
-      // Strip quotes if any
-      if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
-        val = val.substring(1, val.length - 1);
+      const eq = trimmed.indexOf('=');
+      if (eq === -1) continue;
+      const key = trimmed.slice(0, eq).trim();
+      let   val = trimmed.slice(eq + 1).trim();
+      if ((val.startsWith('"') && val.endsWith('"')) ||
+          (val.startsWith("'") && val.endsWith("'"))) {
+        val = val.slice(1, -1);
       }
       env[key] = val;
     }
   } else {
-    console.warn('Warning: .env file not found. Placeholders will not be replaced.');
+    console.warn('Warning: .env not found — no build-time key injection.');
   }
 
-  // 2. Read background.src.js
+  // 2. Read source
   if (!fs.existsSync(srcPath)) {
-    console.error(`Error: Source file not found at ${srcPath}`);
+    console.error(`Error: ${srcPath} not found`);
     process.exit(1);
   }
-
   let code = fs.readFileSync(srcPath, 'utf8');
 
-  // 3. Replace environment variables
-  // Standard pattern: process.env.KEY or process.env['KEY'] or process.env["KEY"]
-  let replacementsCount = 0;
-  
-  // First, handle explicit variables from .env
+  // 3. Replace any process.env.KEY references still present
+  let count = 0;
   for (const [key, value] of Object.entries(env)) {
-    const regexes = [
+    for (const regex of [
       new RegExp(`process\\.env\\.${key}\\b`, 'g'),
       new RegExp(`process\\.env\\[['"]${key}['"]\\]`, 'g')
-    ];
-
-    for (const regex of regexes) {
-      if (regex.test(code)) {
-        code = code.replace(regex, JSON.stringify(value));
-        replacementsCount++;
-      }
+    ]) {
+      const before = code;
+      code = code.replace(regex, JSON.stringify(value));
+      if (code !== before) count++;
     }
   }
 
-  // Also replace any remaining process.env.* reference that wasn't matched (with undefined or warning)
-  const remainingEnvMatches = code.match(/process\.env\.[A-Za-z0-9_]+/g);
-  if (remainingEnvMatches) {
-    for (const match of remainingEnvMatches) {
-      console.warn(`Warning: Environment variable reference "${match}" has no matching key in .env. Replacing with undefined.`);
-      code = code.replace(new RegExp(match.replace('.', '\\.'), 'g'), 'undefined');
+  // Replace any unresolved process.env.* with undefined (and warn)
+  const unresolved = code.match(/process\.env\.[A-Za-z0-9_]+/g);
+  if (unresolved) {
+    for (const ref of [...new Set(unresolved)]) {
+      console.warn(`Warning: ${ref} has no .env entry — replacing with undefined`);
+      code = code.replaceAll(ref, 'undefined');
     }
   }
 
-  // 4. Write compiled output to background.js
-  fs.writeFileSync(destPath, code, 'utf8');
-  console.log(`Successfully built background.js with ${replacementsCount} environment variable replacements.`);
-  console.log('--- Extension Build Complete ---');
+  // 4. Write output
+  fs.writeFileSync(outPath, code, 'utf8');
+  console.log(`Built: ${outPath}  (${count} substitution(s))`);
+  console.log('--- Build Complete ---');
 }
 
 build();

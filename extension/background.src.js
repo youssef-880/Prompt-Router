@@ -1,222 +1,296 @@
-// Gemini Gateway Multi-Agent Orchestrator Service Worker (Source)
-// This file references process.env.GEMINI_API_KEY, which is replaced by the root build.js script.
+// AI Gateway Council — Multi-Provider Orchestrator Service Worker
+// Supports: Gemini (Google), OpenAI (ChatGPT), Claude (Anthropic)
+// API keys are loaded from chrome.storage.local (set via the popup).
 
-// Retrieve API key with secure environment variable build-injection fallback
-function getApiKey(storageResult) {
-  // process.env.GEMINI_API_KEY will be replaced with the string from .env during compile
-  const buildKey = process.env.GEMINI_API_KEY;
-  if (buildKey && buildKey !== 'undefined' && buildKey.trim() !== '') {
-    return buildKey;
-  }
-  return storageResult ? storageResult.GEMINI_API_KEY : null;
+// ─── Provider Configuration ─────────────────────────────────────────────────
+
+const PROVIDER_MODELS = {
+  gemini: { fast: 'gemini-2.5-flash', heavy: 'gemini-2.5-flash' },
+  openai: { fast: 'gpt-4o-mini',      heavy: 'gpt-4o'           },
+  claude: { fast: 'claude-haiku-4-5-20251001', heavy: 'claude-sonnet-4-6' }
+};
+
+function detectProviderFromHostname(hostname) {
+  if (hostname.includes('gemini')) return 'gemini';
+  if (hostname.includes('chatgpt')) return 'openai';
+  if (hostname.includes('claude')) return 'claude';
+  return 'gemini';
 }
 
-// Global listen for legacy or simple fetch AI requests
+async function getProviderConfig(hostname) {
+  const storage = await chrome.storage.local.get([
+    'GEMINI_API_KEY', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'preferred_provider'
+  ]);
+
+  let provider = storage.preferred_provider || 'auto';
+  if (provider === 'auto') {
+    provider = detectProviderFromHostname(hostname);
+  }
+
+  const keyMap = {
+    gemini: storage.GEMINI_API_KEY,
+    openai: storage.OPENAI_API_KEY,
+    claude: storage.ANTHROPIC_API_KEY
+  };
+
+  const apiKey = keyMap[provider];
+  if (!apiKey || apiKey.trim() === '') {
+    const label = { gemini: 'Gemini', openai: 'OpenAI', claude: 'Anthropic' }[provider];
+    throw new Error(`No API key set for ${label}. Open the extension popup and enter your key.`);
+  }
+
+  return { provider, apiKey };
+}
+
+// ─── Message Routing ─────────────────────────────────────────────────────────
+
+// Simple one-shot request (legacy support)
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'fetchAIResponse') {
-    // Run the orchestrator in a single run and return final response
-    runOrchestrationLogic(request.userPrompt, request.model || 'gemini-2.5-flash')
+    const hostname = sender.tab ? new URL(sender.tab.url).hostname : 'gemini.google.com';
+    runOrchestrationLogic(request.userPrompt, request.tier || 'fast', hostname)
       .then(result => sendResponse({ success: true, text: result }))
       .catch(error => sendResponse({ success: false, error: error.message }));
-    
-    // Return true for async response
-    return true; 
+    return true;
   }
 });
 
-// Port-based messaging for real-time progress updates & agent logs
+// Port-based messaging for real-time progress streaming
 chrome.runtime.onConnect.addListener((port) => {
-  if (port.name === 'agent-orchestrator') {
-    port.onMessage.addListener(async (msg) => {
-      if (msg.action === 'startOrchestration') {
-        try {
-          const result = await runOrchestrationLogic(msg.userPrompt, msg.model, port);
-          port.postMessage({ status: 'success', text: result });
-        } catch (error) {
-          console.error("Orchestrator error:", error);
-          port.postMessage({ status: 'error', error: error.message });
-        }
+  if (port.name !== 'agent-orchestrator') return;
+
+  const hostname = port.sender && port.sender.tab
+    ? new URL(port.sender.tab.url).hostname
+    : 'gemini.google.com';
+
+  port.onMessage.addListener(async (msg) => {
+    if (msg.action === 'startOrchestration') {
+      try {
+        const result = await runOrchestrationLogic(msg.userPrompt, msg.tier || 'fast', hostname, port);
+        port.postMessage({ status: 'success', text: result });
+      } catch (error) {
+        console.error('[Orchestrator]', error);
+        port.postMessage({ status: 'error', error: error.message });
       }
-    });
-  }
+    }
+  });
 });
 
-/**
- * Executes the multi-agent orchestration pipeline.
- * Runs up to 5 iterations of: Router -> Sub-Agent -> Router -> ...
- */
-async function runOrchestrationLogic(userPrompt, modelName, port = null) {
-  // 1. Fetch API Key
-  const storage = await chrome.storage.local.get(['GEMINI_API_KEY']);
-  const apiKey = getApiKey(storage);
-  if (!apiKey) {
-    throw new Error('API Key not found. Please configure your Gemini API Key in the extension popup.');
-  }
+// ─── Orchestration Pipeline ───────────────────────────────────────────────────
 
-  // 2. Define Persona Instructions
+async function runOrchestrationLogic(userPrompt, tier, hostname, port = null) {
+  const { provider, apiKey } = await getProviderConfig(hostname);
+  const modelName = PROVIDER_MODELS[provider]?.[tier] ?? PROVIDER_MODELS.gemini.fast;
+
+  const providerLabel = { gemini: 'Gemini', openai: 'OpenAI', claude: 'Claude' }[provider];
+  logProgress(port, `🚦 Initiating Multi-Agent Pipeline — **${providerLabel}** (${modelName})`);
+
+  // ── Agent System Prompts ──────────────────────────────────────────────────
+
   const routerSystemPrompt = `You are the Router agent for a multi-agent software engineering team.
-Your task is to analyze the user's prompt and the conversational history, then make a decision:
-1. If the request needs backend implementation, database schemas, API architecture, performance optimization, or logic, delegate to 'Backend_Optimizer'.
-2. If the request needs frontend layouts, HTML, CSS, JavaScript, user experience updates, or visuals, delegate to 'UI_Engineer'.
-3. If you have gathered all necessary context and code solutions from the sub-agents, or if the user's request is fully answered, compile a final, comprehensive, production-ready response and mark the task as finished.
+Analyze the user's prompt and the conversational history, then decide:
+1. If the request needs backend logic, APIs, databases, performance, or architecture — delegate to 'Backend_Optimizer'.
+2. If the request needs frontend layouts, HTML, CSS, JavaScript, or UX — delegate to 'UI_Engineer'.
+3. If all necessary context has been gathered, or the request is fully addressed, compile a final production-ready response and mark the task finished.
 
-You MUST respond in valid JSON format. Do not write any markdown code block wraps like \`\`\`json around your response, just return the raw JSON object.
-JSON Schema:
+Respond ONLY with a raw JSON object — no markdown code fences.
+Schema:
 {
   "decision": "delegate" | "finish",
   "recipient": "Backend_Optimizer" | "UI_Engineer" | null,
-  "reason": "Why this agent/step was selected",
-  "instruction": "Specific tasks and context for the sub-agent (only if decision is delegate)",
-  "response": "The final comprehensive response in markdown (only if decision is finish)"
+  "reason": "Brief explanation",
+  "instruction": "Specific instructions for the sub-agent (only when decision is delegate)",
+  "response": "Final comprehensive markdown answer (only when decision is finish)"
 }`;
 
   const backendSystemPrompt = `You are Backend_Optimizer, an elite software architect and systems engineer.
-Your specialty is backend logic, database designs, performance, parallel API execution streams, and memory safety.
-Analyze the Router's instructions and the original query, then design/write the logic. Provide clean, well-commented code blocks and explain your choices.`;
+Your specialty: backend logic, database design, API architecture, performance, concurrency, and memory safety.
+Analyze the Router's instructions and the original query. Write clean, production-grade code with clear explanations.`;
 
   const uiSystemPrompt = `You are UI_Engineer, a principal frontend developer and UI/UX specialist.
-Your specialty is building premium, modern user interfaces, visual hierarchy, styling, layout components, and DOM interaction.
-Analyze the Router's instructions and the original query, then design/write the frontend solution. Provide clean HTML/CSS/JS snippets and explain your design decisions.`;
+Your specialty: modern web interfaces, HTML/CSS/JavaScript, visual hierarchy, animations, and DOM interaction.
+Analyze the Router's instructions and the original query. Provide complete, styled HTML/CSS/JS solutions.`;
 
-  // 3. Initialize Orchestration Loop State
-  let iteration = 1;
-  const maxIterations = 5;
+  // ── Orchestration History (OpenAI message format internally) ─────────────
+
   const history = [
-    {
-      role: 'system',
-      content: routerSystemPrompt
-    },
-    {
-      role: 'user',
-      content: `Here is the user query to process: "${userPrompt}"`
-    }
+    { role: 'system', content: routerSystemPrompt },
+    { role: 'user',   content: `User query: "${userPrompt}"` }
   ];
 
-  logProgress(port, `🚦 Initiating Multi-Agent Pipeline for model: **${modelName}**`);
+  const maxIterations = 5;
 
-  // Main orchestrator loop
-  while (iteration <= maxIterations) {
-    logProgress(port, `🔍 **[Iteration ${iteration}/${maxIterations}]** Router analyzing history and planning next step...`);
+  for (let iteration = 1; iteration <= maxIterations; iteration++) {
+    logProgress(port, `🔍 **[Round ${iteration}/${maxIterations}]** Router is planning next step…`);
 
-    // Call Router
-    const routerRawResponse = await callGemini(modelName, history, apiKey);
-    
-    // Parse decision
-    let decisionObj;
+    // Call router
+    const routerRaw = await callProvider(provider, modelName, history, apiKey);
+
+    // Add router response to history for coherent context in next turn
+    history.push({ role: 'assistant', content: routerRaw });
+
+    // Parse router decision
+    let decision;
     try {
-      let cleaned = routerRawResponse.trim();
-      // Strip markdown code block wrapper if the model accidentally output it anyway
-      const match = cleaned.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
-      if (match) {
-        cleaned = match[1];
-      }
-      decisionObj = JSON.parse(cleaned);
-    } catch (e) {
-      console.warn("Could not parse Router response as JSON. Raw response was:", routerRawResponse);
-      // Fallback: treat the raw response as a final answer
-      decisionObj = {
-        decision: 'finish',
-        response: routerRawResponse,
-        reason: 'Failed to parse JSON, falling back to raw output.'
-      };
+      let cleaned = routerRaw.trim();
+      const fenceMatch = cleaned.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+      if (fenceMatch) cleaned = fenceMatch[1];
+      decision = JSON.parse(cleaned);
+    } catch {
+      // Router returned non-JSON — treat as final answer
+      decision = { decision: 'finish', response: routerRaw, reason: 'Router produced a direct answer' };
     }
 
-    if (decisionObj.decision === 'finish') {
-      logProgress(port, `✨ Consensus reached by the Router in **${iteration}** turns: *${decisionObj.reason || 'Tasks complete'}*`);
-      return decisionObj.response || 'No response compiled.';
+    if (decision.decision === 'finish') {
+      logProgress(port, `✨ **Done in ${iteration} round(s):** *${decision.reason || 'Task complete'}*`);
+      return decision.response || 'No response compiled.';
     }
 
-    if (decisionObj.decision === 'delegate') {
-      const agent = decisionObj.recipient;
-      const instruction = decisionObj.instruction;
-      const reason = decisionObj.reason || 'Requires sub-agent expertise';
+    if (decision.decision === 'delegate') {
+      const { recipient: agent, instruction, reason } = decision;
 
-      logProgress(port, `➡️ **Router delegated to ${agent}**: *${reason}*\n\n**Task:** *${instruction}*`);
-
-      // Determine sub-agent prompt
-      let agentPrompt = '';
-      if (agent === 'Backend_Optimizer') {
-        agentPrompt = backendSystemPrompt;
-      } else if (agent === 'UI_Engineer') {
-        agentPrompt = uiSystemPrompt;
-      } else {
+      if (agent !== 'Backend_Optimizer' && agent !== 'UI_Engineer') {
         throw new Error(`Router delegated to unknown agent: "${agent}"`);
       }
 
-      // Execute sub-agent call with the specific instruction
+      logProgress(port, `➡️ **Delegating to ${agent}:** *${reason || 'Sub-agent expertise required'}*\n**Task:** ${instruction}`);
+
+      const agentSystemPrompt = agent === 'Backend_Optimizer' ? backendSystemPrompt : uiSystemPrompt;
       const agentMessages = [
-        { role: 'system', content: agentPrompt },
-        { role: 'user', content: `Original User Prompt: "${userPrompt}"\n\nYour task instructions: "${instruction}"\n\nPlease execute and provide your findings and code.` }
+        { role: 'system', content: agentSystemPrompt },
+        { role: 'user',   content: `Original user prompt: "${userPrompt}"\n\nYour task: "${instruction}"\n\nExecute and provide your implementation.` }
       ];
 
-      logProgress(port, `⚙️ **${agent}** is analyzing requirements and writing solution...`);
-      const agentResult = await callGemini(modelName, agentMessages, apiKey);
+      logProgress(port, `⚙️ **${agent}** is working on the solution…`);
+      const agentResult = await callProvider(provider, modelName, agentMessages, apiKey);
+      logProgress(port, `📥 **${agent}** completed and returned context to Router.`);
 
-      // Append results to orchestration history
+      // Feed sub-agent output back to router as a user turn
       history.push({
         role: 'user',
-        content: `Feedback from execution: Router delegated to ${agent} with instructions: "${instruction}".\n\nHere is ${agent}'s implementation output:\n\n${agentResult}`
+        content: `Update: ${agent} completed task.\nInstructions given: "${instruction}"\n\n${agent} output:\n\n${agentResult}`
       });
-
-      logProgress(port, `📥 **${agent} completed its task** and passed context back.`);
     }
-
-    iteration++;
   }
 
-  // Guardrail fallback: synthesise final output if loops exhaust without explicit finish
-  logProgress(port, `⚠️ **Max iteration limit (${maxIterations}) reached.** Synthesizing final consensus...`);
+  // Fallback: synthesise from all accumulated history
+  logProgress(port, `⚠️ **Max rounds reached.** Synthesizing final answer…`);
   const synthMessages = [
-    { role: 'system', content: 'You are the compiler agent. Review the task history and compile a final, comprehensive, structured answer solving the user request.' },
-    ...history.filter(m => m.role !== 'system') // Filter out the complex router system prompt
+    { role: 'system', content: 'You are a synthesis agent. Review the task history and write a final, comprehensive, structured answer for the user.' },
+    ...history.filter(m => m.role !== 'system')
   ];
-  
-  return await callGemini(modelName, synthMessages, apiKey);
+  return await callProvider(provider, modelName, synthMessages, apiKey);
 }
 
-// Helper: send logs via port if active
-function logProgress(port, text) {
-  console.log(`[Orchestrator Log]: ${text}`);
-  if (port) {
-    port.postMessage({ status: 'log', logText: text });
+// ─── Provider Dispatch ────────────────────────────────────────────────────────
+
+async function callProvider(provider, model, messages, apiKey) {
+  switch (provider) {
+    case 'gemini': return callGemini(model, messages, apiKey);
+    case 'openai': return callOpenAI(model, messages, apiKey);
+    case 'claude': return callClaude(model, messages, apiKey);
+    default: throw new Error(`Unknown provider: "${provider}"`);
   }
 }
 
-// Core Fetch Client Wrapper using Google Generative Language OpenAI Compatibility Endpoint
-async function callGemini(model, messages, apiKey) {
-  const payload = {
-    model: model || 'gemini-2.5-flash',
-    messages: messages
-  };
+// ─── Gemini (via OpenAI-compatibility endpoint) ───────────────────────────────
 
-  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/openai/chat/completions`, {
+async function callGemini(model, messages, apiKey) {
+  const response = await fetch('https://generativelanguage.googleapis.com/v1beta/openai/chat/completions', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${apiKey}`
     },
-    body: JSON.stringify(payload)
+    body: JSON.stringify({ model, messages })
+  });
+  return parseOpenAIStyleResponse(response, 'Gemini');
+}
+
+// ─── OpenAI ───────────────────────────────────────────────────────────────────
+
+async function callOpenAI(model, messages, apiKey) {
+  const response = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`
+    },
+    body: JSON.stringify({ model, messages })
+  });
+  return parseOpenAIStyleResponse(response, 'OpenAI');
+}
+
+// ─── Claude (Anthropic Messages API) ─────────────────────────────────────────
+
+async function callClaude(model, messages, apiKey) {
+  // Anthropic uses a distinct format: system is a top-level field, messages must alternate user/assistant.
+  const systemParts = messages.filter(m => m.role === 'system').map(m => m.content);
+  const systemContent = systemParts.join('\n\n');
+
+  // Build alternating user/assistant array, merging consecutive same-role messages
+  const nonSystem = messages.filter(m => m.role !== 'system');
+  const merged = [];
+  for (const msg of nonSystem) {
+    if (merged.length > 0 && merged[merged.length - 1].role === msg.role) {
+      merged[merged.length - 1].content += '\n\n' + msg.content;
+    } else {
+      merged.push({ role: msg.role, content: msg.content });
+    }
+  }
+
+  // Claude requires the first message to be from 'user'
+  if (merged.length === 0 || merged[0].role !== 'user') {
+    merged.unshift({ role: 'user', content: 'Please proceed.' });
+  }
+
+  const body = { model, max_tokens: 8192, messages: merged };
+  if (systemContent) body.system = systemContent;
+
+  const response = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01'
+    },
+    body: JSON.stringify(body)
   });
 
   if (!response.ok) {
-    let errMsg = `Gemini API Request failed (${response.status})`;
-    const responseText = await response.text();
-    console.error("Gemini API Error Response:", responseText);
-    try {
-      const errJson = JSON.parse(responseText);
-      if (errJson.error && errJson.error.message) {
-        errMsg += `: ${errJson.error.message}`;
-      }
-    } catch (e) {
-      errMsg += `: ${responseText.substring(0, 100)}`;
-    }
-    throw new Error(errMsg);
+    const text = await response.text();
+    let detail = text.substring(0, 150);
+    try { detail = JSON.parse(text)?.error?.message ?? detail; } catch { /* keep raw */ }
+    throw new Error(`Claude API error (${response.status}): ${detail}`);
   }
 
   const data = await response.json();
-  if (data.choices && data.choices.length > 0 && data.choices[0].message) {
-    return data.choices[0].message.content;
-  } else {
-    throw new Error('Unexpected response format from API');
+  if (data.content && data.content.length > 0 && data.content[0].type === 'text') {
+    return data.content[0].text;
+  }
+  throw new Error('Unexpected response format from Claude API');
+}
+
+// ─── Shared Response Parser (OpenAI / Gemini compat) ─────────────────────────
+
+async function parseOpenAIStyleResponse(response, providerName) {
+  if (!response.ok) {
+    const text = await response.text();
+    let detail = text.substring(0, 150);
+    try { detail = JSON.parse(text)?.error?.message ?? detail; } catch { /* keep raw */ }
+    throw new Error(`${providerName} API error (${response.status}): ${detail}`);
+  }
+  const data = await response.json();
+  const content = data?.choices?.[0]?.message?.content;
+  if (content !== undefined && content !== null) return content;
+  throw new Error(`Unexpected response format from ${providerName} API`);
+}
+
+// ─── Logging Helper ───────────────────────────────────────────────────────────
+
+function logProgress(port, text) {
+  console.log('[Orchestrator]', text);
+  if (port) {
+    try { port.postMessage({ status: 'log', logText: text }); } catch { /* port closed */ }
   }
 }
